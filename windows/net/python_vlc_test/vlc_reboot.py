@@ -10,6 +10,8 @@ os.environ['PYTHON_VLC_MODULE_PATH']="F:\\WORK\\VHD_CWJ_File\\tool\\python\\pyth
 
 import vlc
 import time
+import random
+
 
 path = os.path.dirname(__file__)
 os.chdir(path)
@@ -186,7 +188,7 @@ if "__main__" == __name__:
     print("当前脚本目录:", os.path.dirname(__file__))
     mkdir(os.path.dirname(__file__)+".\\output")
     #ip="192.168.15.35"
-    ip="192.168.15.142"
+    ip="192.168.15.159"
     while 1==1:
         t=t+1
         player = Player("--no-video-title-show","--no-xlib")  
@@ -232,6 +234,8 @@ if "__main__" == __name__:
             time.sleep(1)
             udp_sendmsg(ip,1259,'8101040002ff')
             time.sleep(30)
+            random_number = random.randint(1, 10)
+            time.sleep(random_number)
         
 
 
