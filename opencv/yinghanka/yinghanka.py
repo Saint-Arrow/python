@@ -1,3 +1,10 @@
+"""
+银行卡号数字识别 - 图像预处理脚本
+功能: 从银行卡图片中定位、分割出卡号数字区域
+作者: 
+日期: 2026-07-13
+依赖: opencv, numpy
+"""
 import os
 import cv2
 import numpy as np
