@@ -13,7 +13,7 @@ class linear_regression_model(nn.Module):
 
 # 定义好了模型, 手动定义损失函数和优化器（通常在训练开始前做一次）
 model=linear_regression_model()
-criterion = nn.MSELoss()  # 实例化损失函数
+criterion = nn.MSELoss()  # 实例化均方差损失函数
 optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
 
 # 定义训练集数据
