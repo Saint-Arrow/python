@@ -1,3 +1,16 @@
-__pycache__/*
-windows/base/relay/relay_controller.log
+# Python 中间文件（任意层级递归匹配）
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# 虚拟环境 / 构建产物
+.venv/
+venv/
+build/
+dist/
+
+# 日志
+*.log
+
 .qoder/
