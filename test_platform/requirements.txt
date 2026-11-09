@@ -1,0 +1,4 @@
+# pip 会根据当前 Python 版本自动选择兼容版本（本机 3.8 亦可安装）
+PySide6
+zeroconf
+requests
