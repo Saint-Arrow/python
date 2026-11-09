@@ -1,82 +1,98 @@
-"""
-基于 zeroconf 的 mDNS 服务发现 (Service Discovery) 演示。
+# -*- coding: utf-8 -*-
+"""zeroconf mDNS 服务发现与主机名解析 —— "脚本即插件"重构（一份代码，两种用法）
 
-功能：
-1. 监听局域网内的 mDNS 服务广播，自动发现支持的服务（如 _http._tcp.local.、
-   _ipp._tcp.local.、_airplay._tcp.local. 等），并打印服务信息。
-2. 解析某个主机名（例如 "myhost.local"）的 IP 地址（多播 DNS 解析）。
+用法 1：单独运行（行为同旧脚本）
+    python mdns_discovery.py                                    # 监听全部服务 10s
+    python mdns_discovery.py --resolve myhost.local             # 只解析主机名
+    python mdns_discovery.py --service _http._tcp.local. --duration 15 --verbose
 
-依赖：
-    pip install zeroconf
+用法 2：被测试平台挂载
+    test_platform/platform.json 的 "plugins" 列表登记本文件路径，
+    平台启动时自动 import 本文件，@register 的类即出现在 UI 测试项列表。
+    主机名解析成功后产出 device_ip，下游测试参数填 {device_ip} 即可引用。
 
-运行：
-    # 默认监听常见服务并打印到控制台，持续 30 秒
-    python mdns_discovery.py
-
-    # 指定监听的服务类型，并解析某个主机名
-    python mdns_discovery.py --service _http._tcp.local. --resolve myhost.local --duration 15
+约束：平台加载本文件时只做类注册、不执行测试动作（顶层无执行代码）。
 """
 
-import argparse
 import logging
+import os
 import socket
 import sys
 import time
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from zeroconf import (
+    BadTypeInNameException,
+    DNSAddress,
+    DNSOutgoing,
+    DNSQuestion,
+    DNSRecord,
     IPVersion,
+    RecordUpdateListener,
     ServiceBrowser,
     ServiceInfo,
     Zeroconf,
     ZeroconfServiceTypes,
+    const,
 )
-from zeroconf import DNSOutgoing, DNSQuestion, DNSAddress, DNSRecord, const
-from zeroconf import RecordUpdateListener  # 低层 DNS 记录监听器
+
+# ---- 独立运行时把 test_platform 根目录加入 sys.path；被平台加载时不触发 ----
+if __name__ == "__main__":
+    _HERE = os.path.dirname(os.path.abspath(__file__))
+    _PLATFORM = os.path.normpath(os.path.join(_HERE, "..", "..", "test_platform"))
+    if os.path.isdir(_PLATFORM):
+        sys.path.insert(0, _PLATFORM)
+
+from core.base import (  # noqa: E402
+    Context, LogFn, ParamDef, TestCase, TestResult, TestStatus,
+)
+from core.registry import register  # noqa: E402
+
+# 可中断等待函数：等完返回 True，被停止请求打断返回 False
+SleepFn = Callable[[float], bool]
 
 
 # --------------------------------------------------------------------------- #
 # 1. 服务发现：监听局域网内的 mDNS 服务广播
 # --------------------------------------------------------------------------- #
 
-
 class ServiceListener:
-    """ServiceBrowser 的回调监听器，按服务状态变化打印信息。"""
+    """ServiceBrowser 的回调监听器，按服务状态变化输出信息。"""
 
-    def __init__(self) -> None:
+    def __init__(self, log: Callable[[str], None] = print) -> None:
         self.found: Dict[str, ServiceInfo] = {}
+        self.log = log
 
     def add_service(self, zc: Zeroconf, type_: str, name: str) -> None:
         info = zc.get_service_info(type_, name)
         if info is None:
             return
         self.found[name] = info
-        _print_service(type_, name, info, "ADDED")
+        self._print_service(type_, name, info, "ADDED")
 
     def remove_service(self, zc: Zeroconf, type_: str, name: str) -> None:
         self.found.pop(name, None)
-        print(f"[REMOVED] {name} ({type_})")
+        self.log(f"[REMOVED] {name} ({type_})")
 
     def update_service(self, zc: Zeroconf, type_: str, name: str) -> None:
         info = zc.get_service_info(type_, name)
         if info is None:
             return
         self.found[name] = info
-        _print_service(type_, name, info, "UPDATED")
+        self._print_service(type_, name, info, "UPDATED")
 
-
-def _print_service(type_: str, name: str, info: ServiceInfo, state: str) -> None:
-    addrs = _format_addresses(info)
-    port = info.port if info.port is not None else "?"
-    print(f"[{state}] {name}")
-    print(f"    type   : {type_}")
-    print(f"    host   : {info.server or '?'}")
-    print(f"    port   : {port}")
-    print(f"    addrs  : {addrs}")
-    if info.properties:
-        props = {k: _decode(v) for k, v in info.properties.items()}
-        print(f"    props  : {props}")
-    print()
+    def _print_service(self, type_: str, name: str,
+                       info: ServiceInfo, state: str) -> None:
+        addrs = _format_addresses(info)
+        port = info.port if info.port is not None else "?"
+        self.log(f"[{state}] {name}")
+        self.log(f"    type   : {type_}")
+        self.log(f"    host   : {info.server or '?'}")
+        self.log(f"    port   : {port}")
+        self.log(f"    addrs  : {addrs}")
+        if info.properties:
+            props = {k: _decode(v) for k, v in info.properties.items()}
+            self.log(f"    props  : {props}")
 
 
 def _format_addresses(info: ServiceInfo) -> List[str]:
@@ -84,7 +100,9 @@ def _format_addresses(info: ServiceInfo) -> List[str]:
     # 优先使用 addresses_by_version（新版本 API）
     try:
         for addr in info.addresses_by_version(IPVersion.All):
-            addrs.append(socket.inet_ntop(addr.version == 6 and socket.AF_INET6 or socket.AF_INET, addr.packed))
+            addrs.append(socket.inet_ntop(
+                addr.version == 6 and socket.AF_INET6 or socket.AF_INET,
+                addr.packed))
     except Exception:
         pass
     if not addrs and info.addresses:
@@ -100,32 +118,39 @@ def _decode(value) -> str:
     return str(value)
 
 
-def discover_services(service_type: Optional[str], duration: int) -> List[str]:
-    """启动服务发现，阻塞 duration 秒后返回发现到的服务名列表。"""
-    print(f"==> 开始 mDNS 服务发现，监听 {duration} 秒...")
-    zeroconf = Zeroconf()
-    listener = ServiceListener()
+def discover_services(service_type: Optional[str], duration: int,
+                      log: Callable[[str], None] = print,
+                      sleep_fn: Optional[SleepFn] = None) -> List[str]:
+    """启动服务发现，阻塞 duration 秒后返回发现到的服务名列表。
 
-    if service_type:
-        print(f"    监听服务类型: {service_type}\n")
-        ServiceBrowser(zeroconf, service_type, listener)
-    else:
-        # 监听所有已知服务类型
-        print("    监听所有已注册的服务类型...\n")
-        try:
-            # find 返回的是 tuple（元素为服务类型字符串）
-            type_list = list(ZeroconfServiceTypes.find(zc=zeroconf, timeout=2))
-        except Exception as e:
-            print(f"    获取服务类型失败，使用默认类型: {e}")
-            type_list = ["_http._tcp.local.", "_ipp._tcp.local."]
-        ServiceBrowser(zeroconf, type_list, listener)
+    sleep_fn 提供时可中断等待（平台停止请求时提前返回已发现结果）。
+    """
+    log(f"==> 开始 mDNS 服务发现，监听 {duration} 秒...")
+    zeroconf = Zeroconf()
+    listener = ServiceListener(log)
 
     try:
-        time.sleep(duration)
+        if service_type:
+            log(f"    监听服务类型: {service_type}")
+            ServiceBrowser(zeroconf, service_type, listener)
+        else:
+            log("    监听所有已注册的服务类型...")
+            try:
+                # find 返回的是 tuple（元素为服务类型字符串）
+                type_list = list(ZeroconfServiceTypes.find(zc=zeroconf, timeout=2))
+            except Exception as e:
+                log(f"    获取服务类型失败，使用默认类型: {e}")
+                type_list = ["_http._tcp.local.", "_ipp._tcp.local."]
+            ServiceBrowser(zeroconf, type_list, listener)
+
+        if sleep_fn is not None:
+            sleep_fn(duration)   # 被中断则提前结束，返回已发现的
+        else:
+            time.sleep(duration)
     finally:
         zeroconf.close()
 
-    print(f"<== 服务发现结束，共发现 {len(listener.found)} 个服务。")
+    log(f"<== 服务发现结束，共发现 {len(listener.found)} 个服务。")
     return list(listener.found.keys())
 
 
@@ -133,17 +158,18 @@ def discover_services(service_type: Optional[str], duration: int) -> List[str]:
 # 2. 主机名解析：将 xxx.local 解析为 IP 地址
 # --------------------------------------------------------------------------- #
 
-
-def resolve_hostname(hostname: str, timeout: float = 5.0) -> List[str]:
+def resolve_hostname(hostname: str, timeout: float = 5.0,
+                     log: Callable[[str], None] = print,
+                     sleep_fn: Optional[SleepFn] = None) -> List[str]:
     """通过 mDNS 解析主机名（如 "myhost.local"）为 IPv4/IPv6 地址列表。"""
     if not hostname.endswith(".local"):
         hostname = hostname + ".local"
 
-    print(f"==> 正在通过 mDNS 解析主机名: {hostname} (超时 {timeout}s)...")
+    log(f"==> 正在通过 mDNS 解析主机名: {hostname} (超时 {timeout}s)...")
     zeroconf = Zeroconf()
     result: List[str] = []
     try:
-        resolver = _HostnameResolver(hostname, result)
+        resolver = _HostnameResolver(hostname, result, log)
         zeroconf.add_listener(
             resolver,
             [DNSQuestion(hostname, const._TYPE_A, const._CLASS_IN),
@@ -157,24 +183,31 @@ def resolve_hostname(hostname: str, timeout: float = 5.0) -> List[str]:
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline and not resolver.done:
-            time.sleep(0.05)
+            if sleep_fn is not None:
+                if not sleep_fn(0.1):
+                    log("    解析等待被中断")
+                    break
+            else:
+                time.sleep(0.05)
     finally:
         zeroconf.close()
 
     if result:
-        print(f"<== 解析成功: {hostname} -> {result}")
+        log(f"<== 解析成功: {hostname} -> {result}")
     else:
-        print(f"<== 解析失败: 未找到 {hostname} 的地址记录。")
+        log(f"<== 解析失败: 未找到 {hostname} 的地址记录。")
     return result
 
 
 class _HostnameResolver(RecordUpdateListener):
     """低层监听器：捕获响应中与目标主机名匹配的 A / AAAA 地址记录。"""
 
-    def __init__(self, target: str, result: List[str]) -> None:
+    def __init__(self, target: str, result: List[str],
+                 log: Callable[[str], None] = print) -> None:
         self.target = target.lower()
         self.result = result
         self.done = False
+        self.log = log
 
     def _handle(self, record: DNSRecord) -> None:
         if not isinstance(record, DNSAddress):
@@ -191,7 +224,7 @@ class _HostnameResolver(RecordUpdateListener):
             if addr not in self.result:
                 self.result.append(addr)
                 self.done = True
-                print(f"    收到地址记录: {addr}")
+                self.log(f"    收到地址记录: {addr}")
 
     def update_record(self, zc: "Zeroconf", now: float, record: DNSRecord) -> None:
         # 兼容旧版 zeroconf 的同步入口
@@ -205,11 +238,93 @@ class _HostnameResolver(RecordUpdateListener):
 
 
 # --------------------------------------------------------------------------- #
-# 主程序
+# 3. 平台测试项
 # --------------------------------------------------------------------------- #
 
+@register
+class MdnsDiscoveryCase(TestCase):
+    id = "mdns_discovery"
+    name = "mDNS 发现/解析"
+    category = "网络发现"
+    description = ("监听局域网 mDNS 服务广播，或把 xxx.local 主机名解析为 IP；"
+                   "解析成功产出 {device_ip} 供下游测试引用")
+    params = [
+        ParamDef("mode", "模式", "resolve", "str",
+                 "resolve=仅解析主机名 / discover=仅服务发现 / both=都跑"),
+        ParamDef("hostname", "主机名", "", "str",
+                 "如 myhost.local（resolve/both 必填），产出 {device_ip}"),
+        ParamDef("resolve_timeout", "解析超时(秒)", "5", "float"),
+        ParamDef("service", "服务类型", "", "str",
+                 "如 _http._tcp.local.，留空=监听全部（discover/both 有效）"),
+        ParamDef("duration", "发现时长(秒)", "10", "int"),
+    ]
 
-def main() -> int:
+    def run(self, ctx: Context, log: LogFn) -> TestResult:
+        mode = (self.p_str("mode", "resolve").strip().lower() or "resolve")
+        if mode not in ("resolve", "discover", "both"):
+            return TestResult(TestStatus.FAILED, f"未知模式: {mode}")
+        hostname = self.p_str("hostname").strip()
+        timeout = self.p_float("resolve_timeout", 5.0)
+        service = self.p_str("service").strip() or None
+        duration = self.p_int("duration", 10)
+
+        def _sleep(sec: float) -> bool:
+            return self.sleep_interruptible(sec)
+
+        data: Dict[str, object] = {}
+        msgs: List[str] = []
+
+        # ---- 服务发现 ----
+        if mode in ("discover", "both"):
+            if self.stop_requested:
+                return TestResult(TestStatus.SKIPPED, "用户停止")
+            # 服务类型形如 _http._tcp.local.；主机名（vx90sndi.local）应走
+            # hostname 解析而非服务浏览，提前拦截避免底层抛异常
+            if service and not service.startswith("_"):
+                return TestResult(TestStatus.FAILED, (
+                    f"service 参数 '{service}' 不是服务类型"
+                    "（应形如 _http._tcp.local.）；"
+                    "解析主机名请把 mode 设为 resolve 并填 hostname"))
+            try:
+                services = discover_services(service, duration,
+                                             log=log, sleep_fn=_sleep)
+            except BadTypeInNameException as e:
+                return TestResult(TestStatus.FAILED,
+                                  f"服务类型无效: '{service}'（{e}）", data=data)
+            data["mdns_services"] = services
+            data["mdns_service_count"] = len(services)
+            if self.stop_requested:
+                return TestResult(TestStatus.SKIPPED,
+                                  f"用户停止（发现阶段），已发现 {len(services)} 个",
+                                  data=data)
+            msgs.append(f"发现 {len(services)} 个服务")
+
+        # ---- 主机名解析 ----
+        if mode in ("resolve", "both"):
+            if not hostname:
+                return TestResult(TestStatus.FAILED,
+                                  "resolve 模式必须填写 hostname", data=data)
+            addresses = resolve_hostname(hostname, timeout,
+                                         log=log, sleep_fn=_sleep)
+            if self.stop_requested:
+                return TestResult(TestStatus.SKIPPED, "用户停止（解析阶段）",
+                                  data=data)
+            if not addresses:
+                return TestResult(TestStatus.FAILED,
+                                  f"解析 {hostname} 失败（{timeout}s 超时）",
+                                  data=data)
+            data["mdns_addresses"] = addresses
+            # IPv4 优先，供下游 {device_ip} 占位符引用
+            device_ip = next((a for a in addresses if ":" not in a), addresses[0])
+            data["device_ip"] = device_ip
+            extra = f"（共 {len(addresses)} 个地址）" if len(addresses) > 1 else ""
+            msgs.append(f"{hostname} -> {device_ip}{extra}")
+
+        return TestResult(TestStatus.PASSED, "；".join(msgs), data=data)
+
+
+# ---------------- 单独运行入口 ----------------
+def _main() -> None:
     # Windows 控制台默认 GBK，重配置为 UTF-8 以避免中文乱码（非终端环境忽略）
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -217,38 +332,66 @@ def main() -> int:
     except Exception:
         pass
 
-    # 非交互终端（IDE / 管道）下 stdout 为块缓冲，print 会攒到退出才刷出，
-    # 表现为“没有任何输出”。强制每次 print 立即刷新。
+    import argparse
     import builtins
     import functools
 
+    # 非交互终端（IDE / 管道）下 stdout 为块缓冲，print 会攒到退出才刷出，
+    # 表现为"没有任何输出"。强制每次 print 立即刷新。
     builtins.print = functools.partial(builtins.print, flush=True)
 
-    parser = argparse.ArgumentParser(description="zeroconf mDNS 发现与解析演示")
-    parser.add_argument("--service", default=None,
-                        help="要监听的服务类型，例如 _http._tcp.local.（默认监听全部）")
-    parser.add_argument("--resolve", default=None,
-                        help="要解析的主机名，例如 myhost.local")
-    parser.add_argument("--duration", type=int, default=10,
-                        help="服务发现持续时间（秒），默认 10")
-    parser.add_argument("--resolve-timeout", type=float, default=5.0,
-                        help="主机名解析超时（秒），默认 5.0")
-    parser.add_argument("--verbose", action="store_true", help="开启详细日志")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(
+        description="zeroconf mDNS 发现与解析（可独立运行，亦可被 test_platform 挂载）")
+    ap.add_argument("--service", default=None,
+                    help="要监听的服务类型，例如 _http._tcp.local.（默认监听全部）")
+    ap.add_argument("--resolve", default="vx90sndi.local",
+                    help="要解析的主机名，例如 myhost.local")
+    ap.add_argument("--duration", type=int, default=0,
+                    help="服务发现持续时间（秒），默认 10；0=跳过发现，不输出其他的")
+    ap.add_argument("--resolve-timeout", type=float, default=5.0,
+                    help="主机名解析超时（秒），默认 5.0")
+    ap.add_argument("--verbose", action="store_true", help="开启详细日志")
+    args = ap.parse_args()
 
     if args.verbose:
-        logging.getLogger("zeroconf").setLevel(logging.DEBUG)
+        logging.getLogger("zeroconf").setLevel(logging.INFO)
 
-    # 仅当 duration > 0 时才跑服务发现；否则（只解析主机名时）跳过，
-    # 避免 Zeroconf 被立即关闭导致后台异步查询抛出 NotRunningException
-    if args.duration > 0:
-        discover_services(args.service, args.duration)
+    if args.duration <= 0 and not args.resolve:
+        print("提示：--duration 0 且未指定 --resolve，无操作。")
+        return
 
-    if args.resolve:
-        resolve_hostname(args.resolve, args.resolve_timeout)
+    # 语义同旧脚本：duration>0 跑发现，指定 --resolve 跑解析
+    if args.resolve and args.duration > 0:
+        mode = "both"
+    elif args.resolve:
+        mode = "resolve"
+    else:
+        mode = "discover"
 
-    return 0
+    case = MdnsDiscoveryCase({
+        "mode": mode,
+        "hostname": args.resolve or "",
+        "resolve_timeout": str(args.resolve_timeout),
+        "service": args.service or "",
+        "duration": str(max(args.duration, 0)),
+    })
+    print(f"[单独运行] {case.name}  mode={mode}")
+    try:
+        result = case.run(Context(), log=print)
+    except KeyboardInterrupt:
+        print("\n[中断] 用户 Ctrl+C")
+        return
+    print(f"[结果] {result.status.value}  {result.message}")
+    if result.data:
+        # 长列表截断显示（完整内容仍在 data / 报告里）
+        shown = {}
+        for k, v in result.data.items():
+            if isinstance(v, list) and len(v) > 8:
+                shown[k] = v[:8] + [f"...（共 {len(v)} 项）"]
+            else:
+                shown[k] = v
+        print(f"[产出] {shown}")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _main()
