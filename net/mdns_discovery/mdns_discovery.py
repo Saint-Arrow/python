@@ -5,6 +5,8 @@
     python mdns_discovery.py                                    # 监听全部服务 10s
     python mdns_discovery.py --resolve myhost.local             # 只解析主机名
     python mdns_discovery.py --service _http._tcp.local. --duration 15 --verbose
+    python mdns_discovery.py --resolve myhost.local --iface all # 指定所有网卡
+    python mdns_discovery.py --resolve myhost.local --iface 192.168.1.100
 
 用法 2：被测试平台挂载
     test_platform/platform.json 的 "plugins" 列表登记本文件路径，
@@ -27,6 +29,7 @@ from zeroconf import (
     DNSOutgoing,
     DNSQuestion,
     DNSRecord,
+    InterfaceChoice,
     IPVersion,
     RecordUpdateListener,
     ServiceBrowser,
@@ -118,15 +121,46 @@ def _decode(value) -> str:
     return str(value)
 
 
+def _parse_interfaces(iface: Optional[str]):
+    """把 iface 参数解析为 zeroconf 的 interfaces 值。
+
+    None/空 -> None（zeroconf 默认：仅系统默认路由所在的网卡）
+    "all"/"*" -> InterfaceChoice.All（所有网卡）
+    其他 -> IP 字符串列表（逗号分隔可指定多张网卡）
+    """
+    if not iface or not iface.strip():
+        return None
+    text = iface.strip().lower()
+    if text in ("all", "*"):
+        return InterfaceChoice.All
+    return [s.strip() for s in iface.split(",") if s.strip()]
+
+
+def _make_zeroconf(iface: Optional[str], log: Callable[[str], None]) -> Zeroconf:
+    """按 iface 描述创建 Zeroconf 实例，并打印实际使用的网卡便于排障。"""
+    interfaces = _parse_interfaces(iface)
+    zc = Zeroconf(interfaces=interfaces)
+    if interfaces is None:
+        log("    网卡: 默认（系统默认路由网卡）")
+    else:
+        try:
+            log(f"    网卡: {list(zc.interfaces)}")
+        except Exception:
+            pass
+    return zc
+
+
 def discover_services(service_type: Optional[str], duration: int,
                       log: Callable[[str], None] = print,
-                      sleep_fn: Optional[SleepFn] = None) -> List[str]:
+                      sleep_fn: Optional[SleepFn] = None,
+                      iface: Optional[str] = None) -> List[str]:
     """启动服务发现，阻塞 duration 秒后返回发现到的服务名列表。
 
     sleep_fn 提供时可中断等待（平台停止请求时提前返回已发现结果）。
+    iface 指定网卡：None=默认路由网卡；"all"=所有网卡；或本机 IP 列表。
     """
     log(f"==> 开始 mDNS 服务发现，监听 {duration} 秒...")
-    zeroconf = Zeroconf()
+    zeroconf = _make_zeroconf(iface, log)
     listener = ServiceListener(log)
 
     try:
@@ -160,13 +194,14 @@ def discover_services(service_type: Optional[str], duration: int,
 
 def resolve_hostname(hostname: str, timeout: float = 5.0,
                      log: Callable[[str], None] = print,
-                     sleep_fn: Optional[SleepFn] = None) -> List[str]:
+                     sleep_fn: Optional[SleepFn] = None,
+                     iface: Optional[str] = None) -> List[str]:
     """通过 mDNS 解析主机名（如 "myhost.local"）为 IPv4/IPv6 地址列表。"""
     if not hostname.endswith(".local"):
         hostname = hostname + ".local"
 
     log(f"==> 正在通过 mDNS 解析主机名: {hostname} (超时 {timeout}s)...")
-    zeroconf = Zeroconf()
+    zeroconf = _make_zeroconf(iface, log)
     result: List[str] = []
     try:
         resolver = _HostnameResolver(hostname, result, log)
@@ -257,6 +292,8 @@ class MdnsDiscoveryCase(TestCase):
         ParamDef("service", "服务类型", "", "str",
                  "如 _http._tcp.local.，留空=监听全部（discover/both 有效）"),
         ParamDef("duration", "发现时长(秒)", "10", "int"),
+        ParamDef("iface", "网卡", "", "str",
+                 "空=系统默认路由网卡；all=所有网卡；或填本机 IP（逗号分隔多个）"),
     ]
 
     def run(self, ctx: Context, log: LogFn) -> TestResult:
@@ -267,6 +304,7 @@ class MdnsDiscoveryCase(TestCase):
         timeout = self.p_float("resolve_timeout", 5.0)
         service = self.p_str("service").strip() or None
         duration = self.p_int("duration", 10)
+        iface = self.p_str("iface").strip() or None
 
         def _sleep(sec: float) -> bool:
             return self.sleep_interruptible(sec)
@@ -287,10 +325,13 @@ class MdnsDiscoveryCase(TestCase):
                     "解析主机名请把 mode 设为 resolve 并填 hostname"))
             try:
                 services = discover_services(service, duration,
-                                             log=log, sleep_fn=_sleep)
+                                             log=log, sleep_fn=_sleep, iface=iface)
             except BadTypeInNameException as e:
                 return TestResult(TestStatus.FAILED,
                                   f"服务类型无效: '{service}'（{e}）", data=data)
+            except OSError as e:
+                return TestResult(TestStatus.FAILED,
+                                  f"网卡创建失败（iface='{iface}'）: {e}", data=data)
             data["mdns_services"] = services
             data["mdns_service_count"] = len(services)
             if self.stop_requested:
@@ -304,8 +345,12 @@ class MdnsDiscoveryCase(TestCase):
             if not hostname:
                 return TestResult(TestStatus.FAILED,
                                   "resolve 模式必须填写 hostname", data=data)
-            addresses = resolve_hostname(hostname, timeout,
-                                         log=log, sleep_fn=_sleep)
+            try:
+                addresses = resolve_hostname(hostname, timeout,
+                                             log=log, sleep_fn=_sleep, iface=iface)
+            except OSError as e:
+                return TestResult(TestStatus.FAILED,
+                                  f"网卡创建失败（iface='{iface}'）: {e}", data=data)
             if self.stop_requested:
                 return TestResult(TestStatus.SKIPPED, "用户停止（解析阶段）",
                                   data=data)
@@ -344,17 +389,20 @@ def _main() -> None:
         description="zeroconf mDNS 发现与解析（可独立运行，亦可被 test_platform 挂载）")
     ap.add_argument("--service", default=None,
                     help="要监听的服务类型，例如 _http._tcp.local.（默认监听全部）")
-    ap.add_argument("--resolve", default="vx90sndi.local",
+    ap.add_argument("--resolve", default=None,
                     help="要解析的主机名，例如 myhost.local")
-    ap.add_argument("--duration", type=int, default=0,
+    ap.add_argument("--duration", type=int, default=10,
                     help="服务发现持续时间（秒），默认 10；0=跳过发现，不输出其他的")
     ap.add_argument("--resolve-timeout", type=float, default=5.0,
                     help="主机名解析超时（秒），默认 5.0")
+    ap.add_argument("--iface", default=None,
+                    help="指定网卡：all=所有网卡；或本机 IP（逗号分隔多个）；"
+                         "默认=系统默认路由网卡")
     ap.add_argument("--verbose", action="store_true", help="开启详细日志")
     args = ap.parse_args()
 
     if args.verbose:
-        logging.getLogger("zeroconf").setLevel(logging.INFO)
+        logging.getLogger("zeroconf").setLevel(logging.DEBUG)
 
     if args.duration <= 0 and not args.resolve:
         print("提示：--duration 0 且未指定 --resolve，无操作。")
@@ -374,6 +422,7 @@ def _main() -> None:
         "resolve_timeout": str(args.resolve_timeout),
         "service": args.service or "",
         "duration": str(max(args.duration, 0)),
+        "iface": args.iface or "",
     })
     print(f"[单独运行] {case.name}  mode={mode}")
     try:
