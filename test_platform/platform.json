@@ -2,6 +2,8 @@
   "plugins": [
     "../net/udp_reboot_test.py",
     "../net/mdns_discovery/mdns_discovery.py",
-    "../net/fpga_reboot_test.py"
+    "../net/fpga_reboot_test.py",
+    "../net/st2110_synced_test/st2110_synced_test.py",
+    "../base/random_gen/random_gen.py"
   ]
 }

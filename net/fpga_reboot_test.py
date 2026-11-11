@@ -69,8 +69,7 @@ class CgiRebootCase(TestCase):
     category = "设备控制"
     description = "循环发送 CGI(HTTP) reboot 请求做重启老化，等待期间可被平台停止"
     params = [
-        ParamDef("ip", "设备 IP", DEFAULT_DEVICE_IP, "str",
-                 "支持 {device_ip} 引用 mDNS 发现结果"),
+        ParamDef("ip", "设备 IP", DEFAULT_DEVICE_IP, "str"),
         ParamDef("url_path", "重启接口路径", DEFAULT_REBOOT_URL_PATH),
         ParamDef("timeout", "HTTP 超时(秒)", "10", "int"),
         ParamDef("reboot_wait", "重启等待(秒)", str(DEFAULT_REBOOT_WAIT_SECONDS), "int"),

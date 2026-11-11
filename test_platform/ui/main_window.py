@@ -89,6 +89,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._log_file = self._open_log_file()
+        self._append_log(f"日志文件: {os.path.abspath(self._log_file.name)}")
         self._append_log(f"已加载 {len(self.cases)} 个测试项: "
                          + ", ".join(sorted(self.cases)))
 
@@ -381,9 +382,14 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------- 日志/方案
     def _open_log_file(self):
-        os.makedirs("logs", exist_ok=True)
-        path = os.path.join("logs", f"run_{datetime.now():%Y%m%d_%H%M%S}.log")
-        return open(path, "a", encoding="utf-8")
+        """在平台根目录 logs/ 下创建 log_<启动时间>.log；失败则降级为丢弃模式。"""
+        try:
+            log_dir = os.path.join(_ROOT, "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            path = os.path.join(log_dir, f"log_{datetime.now():%Y%m%d_%H%M%S}.log")
+            return open(path, "a", encoding="utf-8")
+        except OSError:
+            return open(os.devnull, "w", encoding="utf-8")
 
     def _append_log(self, line: str) -> None:
         self.txt_log.appendPlainText(line)

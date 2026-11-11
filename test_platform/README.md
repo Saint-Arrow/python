@@ -35,11 +35,12 @@ test_platform/
 | UDP 指令重启 | `udp_reboot` | `net/udp_reboot_test.py` | 循环发复位/关机指令做重启老化 |
 | CGI 接口重启 | `cgi_reboot` | `net/cgi_reboot_test.py` | 循环发 CGI(HTTP) reboot 请求做重启老化（自 st2110_synced_test 抽取，`http_reboot` 亦可作库导入） |
 | mDNS 发现/解析 | `mdns_discovery` | `net/mdns_discovery/mdns_discovery.py` | 监听 mDNS 服务广播、解析 xxx.local 为 IP，产出 `{device_ip}` |
+| ST2110 同步状态检测 | `st2110_sync_check` | `net/st2110_synced_test/st2110_synced_test.py` | 发送一次 sync 检测请求判定 synced/unsync；与 `cgi_reboot` 组队列 + 循环轮数即复现原脚本 reboot→检测老化流程 |
+| 随机数生成 | `random_gen` | `base/random_gen/random_gen.py` | 生成 [min,max] 随机数（int/float、可去重、可固定种子），产出 `{random_value}`；下游参数引用它 + 循环轮数即随机参数烤机 |
 
 待接入的老脚本（原地重构后登记进 `platform.json` 即可）：
 
 - `net/reboot_test_hdmi/hdmi_test.py` — ffmpeg 桌面截图采集
-- `net/st2110_synced_test/` — ST2110 reboot 同步性（重启部分已抽出为 `cgi_reboot`，剩 sync 检测主循环）
 - telnet 命令执行等
 
 ## 核心机制
