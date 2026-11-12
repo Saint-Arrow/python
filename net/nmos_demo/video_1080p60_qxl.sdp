@@ -1,0 +1,11 @@
+v=0
+o=- 4003461987 4003461987 IN IP4 192.168.17.66
+s=qx-022494 SFP F VID
+t=0 0
+m=video 5178 RTP/AVP 96
+c=IN IP4 239.40.202.1/32
+a=ts-refclk:localmac=00-1F-7F-02-57-DE
+
+a=source-filter: incl IN IP4 239.40.202.1 192.168.17.66
+a=rtpmap:96 raw/90000
+a=fmtp:96 width=1920; height=1080; exactframerate=60; sampling=YCbCr-4:2:2; depth=10; colorimetry=BT709; TCS=SDR; PM=2110GPM; SSN=ST2110-20:2017; TP=2110TPNL; RANGE=NARROW
