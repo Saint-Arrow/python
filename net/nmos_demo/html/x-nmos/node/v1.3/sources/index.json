@@ -2,14 +2,53 @@
   {
     "id": "8a4c9b30-5d6e-4f7a-8b12-c3d4e5f6a7b8",
     "version": "1700000000:0",
-    "label": "Virtual Camera",
-    "description": "static video source",
-    "tags": {},
-    "grain_rate": {"numerator": 30, "denominator": 1},
-    "caps": {},
-    "device_id": "7f3b8a20-4c5d-4e6f-9a01-b2c3d4e5f6a7",
-    "parents": [],
+    "label": "VHD Video Source",
+    "description": "VHD Video Source",
+    "tags": {
+      "host": [
+        "host1"
+      ]
+    },
     "format": "urn:x-nmos:format:video",
-    "clock_name": "clk0"
+    "caps": {},
+    "grain_rate": {
+      "numerator": 30,
+      "denominator": 1
+    },
+    "parents": [],
+    "device_id": "7f3b8a20-4c5d-4e6f-9a01-b2c3d4e5f6a7",
+    "clock_name": "clk1"
+  },
+  {
+    "id": "8a4c9b31-5d6e-4f7a-8b12-c3d4e5f6a7b8",
+    "version": "1700000000:0",
+    "label": "VHD Source",
+    "description": "VHD Source",
+    "tags": {
+      "host": [
+        "host1"
+      ]
+    },
+    "format": "urn:x-nmos:format:audio",
+    "caps": {},
+    "parents": [],
+    "device_id": "7f3b8a20-4c5d-4e6f-9a01-b2c3d4e5f6a7",
+    "clock_name": "clk1"
+  },
+  {
+    "id": "8a4c9b32-5d6e-4f7a-8b12-c3d4e5f6a7b8",
+    "version": "1700000000:0",
+    "label": "VHD Source",
+    "description": "VHD Source",
+    "tags": {
+      "host": [
+        "host1"
+      ]
+    },
+    "format": "urn:x-nmos:format:data",
+    "caps": {},
+    "parents": [],
+    "device_id": "7f3b8a20-4c5d-4e6f-9a01-b2c3d4e5f6a7",
+    "clock_name": "clk1"
   }
 ]

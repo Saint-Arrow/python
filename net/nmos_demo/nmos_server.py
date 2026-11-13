@@ -54,6 +54,8 @@ def rewrite(path):
 
 
 class NmosHandler(SimpleHTTPRequestHandler):
+    protocol_version = "HTTP/1.0"
+
     def _add_cors(self):
         # 对齐 nmos-cpp(qx) 的响应头，避免 BMD Converters Setup(Web 技术栈)
         # 的跨域 XHR 被浏览器同源策略拦截响应体

@@ -117,7 +117,6 @@ class NmosNodeAdvertiser:
         self._server = host_name or f"{_sanitize_host(self._instance)}.local."
 
         txt: TxtDict = {
-            "txtvers": "1",
             "api_auth": api_auth,
             "api_proto": api_proto,
             "api_ver": api_ver,
