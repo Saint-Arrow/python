@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
-"""NMOS IS-05 对设备写视频 SDP —— "脚本即插件"（一份代码，两种用法）
+"""NMOS IS-05 对设备写视频/音频/ANC SDP —— "脚本即插件"（一份代码，两种用法）
 
-场景：把视频 SDP 写入 NMOS 设备（如 Blackmagic 2110 IP UpDownCross 12G，
+场景：把视频/音频/ANC(ST2110-40 辅助数据) SDP 写入 NMOS 设备
+      （如 Blackmagic 2110 IP UpDownCross 12G，
       mDNS: "2110 IP UpDownCross 12G._http._tcp.local."，HTTP 端口 80）。
+      video / audio / anc 的 receiver 在设备上相互独立，可分别提供 SDP 各自写入。
 
 NMOS 标准 peer-to-peer 发现链（IS-04 Spec）：
   1. mDNS 浏览 _nmos-node._tcp.local. -> TXT: api_proto/api_port/api_ver
@@ -235,9 +237,18 @@ def list_receivers(session, conn_base: str, node_base: Optional[str],
     return out
 
 
-def pick_video_receiver(session, conn_base: str, node_base: Optional[str],
-                        timeout: float, receiver_id: Optional[str], log) -> str:
-    """选定 receiver：显式 id 优先；否则按 format=video（或 id/label 含 video）选。"""
+def pick_receiver(session, conn_base: str, node_base: Optional[str],
+                  timeout: float, receiver_id: Optional[str], log,
+                  fmt: str = "video",
+                  match_formats: Optional[List[str]] = None) -> str:
+    """选定 receiver：显式 id 优先；否则按 format 选择。
+
+    fmt 为日志/产出里展示的短名（video/audio/anc）；match_formats 为实际匹配
+    IS-04 format 的候选令牌（短名或 URN 全名，如 urn:x-nmos:format:video /
+    urn:x-nmos:format:audio / urn:x-nmos:format:data）。缺省时等于 [fmt]。
+    例如 ANC 在 NMOS 里常以 data 格式出现，可传 match_formats=["anc","data"]。
+    兜底再用 id/label 关键字匹配。
+    """
     items = list_receivers(session, conn_base, node_base, timeout, log)
     if not items:
         raise RuntimeError("设备未返回任何 receiver")
@@ -249,14 +260,24 @@ def pick_video_receiver(session, conn_base: str, node_base: Optional[str],
             if it["id"] == receiver_id:
                 return receiver_id
         raise RuntimeError(f"未找到指定 receiver: {receiver_id}")
-    for it in items:  # IS-04 format（URN 全名或短名，如 video / urn:x-nmos:format:video）
-        fmt = str(it["format"]).lower()
-        if fmt == "video" or fmt.endswith(":video"):
+    cands = [str(c).lower() for c in (match_formats or [fmt])]
+    for it in items:  # IS-04 format（URN 全名或短名）
+        got = str(it["format"]).lower()
+        if got in cands or any(got.endswith(":" + c) for c in cands):
             return it["id"]
     for it in items:  # 兜底：id/label 关键字
-        if "video" in (it["id"] + " " + it["label"]).lower():
+        blob = (it["id"] + " " + it["label"]).lower()
+        if any(c in blob for c in cands):
             return it["id"]
-    raise RuntimeError("未能自动识别视频 receiver，请指定 receiver_id")
+    raise RuntimeError(
+        f"未能自动识别 {fmt} receiver（候选格式 {cands}），请指定 receiver_id")
+
+
+def pick_video_receiver(session, conn_base: str, node_base: Optional[str],
+                        timeout: float, receiver_id: Optional[str], log) -> str:
+    """选定视频 receiver（fmt=video 的便捷封装）。"""
+    return pick_receiver(session, conn_base, node_base, timeout,
+                         receiver_id, log, fmt="video")
 
 
 def _stage_and_activate(session, conn_base: str, rid: str, sdp: str,
@@ -308,15 +329,16 @@ def _stage_and_activate(session, conn_base: str, rid: str, sdp: str,
                        f"（状态码 {codes}）{detail}")
 
 
-def write_video_sdp(session, conn_base: str, node_base: Optional[str], sdp: str,
-                    receiver_id: Optional[str] = None,
-                    timeout: float = 5.0, verify: bool = True,
-                    log: Callable[[str], None] = print) -> Dict[str, object]:
-    """主流程：选 receiver -> 写 SDP -> 激活 -> 校验。成功返回信息 dict。"""
-    rid = pick_video_receiver(session, conn_base, node_base, timeout, receiver_id, log)
-    log(f"    目标 receiver: {rid}")
+def _write_sdp(session, conn_base: str, node_base: Optional[str], sdp: str,
+               receiver_id: Optional[str], timeout: float, verify: bool,
+               log, fmt: str = "video",
+               match_formats: Optional[List[str]] = None) -> Dict[str, object]:
+    """主流程（通用）：选 receiver -> 写 SDP -> 激活 -> 校验。成功返回信息 dict。"""
+    rid = pick_receiver(session, conn_base, node_base, timeout, receiver_id, log,
+                        fmt, match_formats)
+    log(f"    目标 {fmt} receiver: {rid}")
     _stage_and_activate(session, conn_base, rid, sdp, timeout, log)
-    info: Dict[str, object] = {"receiver_id": rid, "written": True}
+    info: Dict[str, object] = {"receiver_id": rid, "format": fmt, "written": True}
     if verify:
         ok = False
         act: Dict[str, object] = {}
@@ -333,15 +355,51 @@ def write_video_sdp(session, conn_base: str, node_base: Optional[str], sdp: str,
             log("    active 原始返回: "
                 + json.dumps(act, ensure_ascii=False)[:600])
             raise RuntimeError(
-                "激活校验失败：active.master_enable 不为 true"
+                f"{fmt} 激活校验失败：active.master_enable 不为 true"
                 "（设备接受了请求但未能真正起流：检查 SDP 参数 PM/TP/depth"
                 " 与 ts-refclk 的 PTP clock/domain 是否合法）")
         tf = (act.get("transport_file") or {}).get("data") or ""
         if not tf:
-            raise RuntimeError("激活校验失败：active.transport_file 为空")
+            raise RuntimeError(f"{fmt} 激活校验失败：active.transport_file 为空")
         log(f"    active SDP 首行: {tf.splitlines()[0] if tf else ''}")
         info["sdp_active"] = True
     return info
+
+
+def write_video_sdp(session, conn_base: str, node_base: Optional[str], sdp: str,
+                    receiver_id: Optional[str] = None,
+                    timeout: float = 5.0, verify: bool = True,
+                    log: Callable[[str], None] = print) -> Dict[str, object]:
+    """写视频 SDP：选 format=video 的 receiver -> 写 SDP -> 激活 -> 校验。"""
+    return _write_sdp(session, conn_base, node_base, sdp, receiver_id,
+                      timeout, verify, log, fmt="video")
+
+
+def write_audio_sdp(session, conn_base: str, node_base: Optional[str], sdp: str,
+                    receiver_id: Optional[str] = None,
+                    timeout: float = 5.0, verify: bool = True,
+                    log: Callable[[str], None] = print) -> Dict[str, object]:
+    """写音频 SDP：选 format=audio 的 receiver -> 写 SDP -> 激活 -> 校验。
+
+    设备对 audio receiver 与 video receiver 是独立的，二者可分别写入；
+    本函数只负责音频这一路，调用方（测试项/CLI）可再单独写视频路。
+    """
+    return _write_sdp(session, conn_base, node_base, sdp, receiver_id,
+                      timeout, verify, log, fmt="audio")
+
+
+def write_anc_sdp(session, conn_base: str, node_base: Optional[str], sdp: str,
+                  receiver_id: Optional[str] = None,
+                  timeout: float = 5.0, verify: bool = True,
+                  log: Callable[[str], None] = print) -> Dict[str, object]:
+    """写 ANC（辅助数据 ST 2110-40）SDP：选 format=anc/data 的 receiver -> 写 SDP。
+
+    NMOS 中辅助数据 receiver 的 format 通常为 urn:x-nmos:format:data，
+    故匹配候选同时包含 "anc" 与 "data"。与 video/audio 一样独立写入。
+    """
+    return _write_sdp(session, conn_base, node_base, sdp, receiver_id,
+                      timeout, verify, log, fmt="anc",
+                      match_formats=["anc", "data"])
 
 
 # --------------------------------------------------------------------------- #
@@ -516,11 +574,12 @@ def _truthy(v: str) -> bool:
 @register
 class NmosSdpWriteCase(TestCase):
     id = "nmos_sdp_write"
-    name = "NMOS 写视频SDP"
+    name = "NMOS 写SDP"
     category = "NMOS/2110"
     description = ("按 NMOS 标准发现链（mDNS _nmos-node -> Node API controls -> "
-                   "IS-05）把视频 SDP 写入 receiver 并激活校验；"
-                   "复用 mdns_discovery 做 mDNS 发现，支持绑定本机源 IP 发送")
+                   "IS-05）把视频/音频/ANC SDP 写入对应 receiver 并激活校验；"
+                   "复用 mdns_discovery 做 mDNS 发现，支持绑定本机源 IP 发送。"
+                   "video/audio/anc 的 SDP 可分别提供，三者独立写入各自 receiver")
     params = [
         ParamDef("ip", "设备IP", "192.168.17.62", "str",
                  "支持 {device_ip} 占位符；留空且 mdns=1 时自动发现"),
@@ -532,11 +591,24 @@ class NmosSdpWriteCase(TestCase):
         ParamDef("mdns", "mDNS发现设备", "0", "str", "1=ip 为空时按设备名自动发现"),
         ParamDef("mdns_name", "设备名关键字", "2110 IP UpDownCross 12G", "str"),
         ParamDef("mdns_duration", "发现时长(秒)", "10", "int"),
-        ParamDef("sdp_file", "SDP文件", "", "str", "与 sdp_text/sdp_url 三选一"),
-        ParamDef("sdp_text", "SDP文本", "", "str"),
-        ParamDef("sdp_url", "SDP的URL", "", "str"),
-        ParamDef("receiver_id", "Receiver ID", "", "str",
+        ParamDef("sdp_file", "视频SDP文件", "", "str",
+                 "视频 SDP，与 sdp_text/sdp_url 三选一"),
+        ParamDef("sdp_text", "视频SDP文本", "", "str"),
+        ParamDef("sdp_url", "视频SDP的URL", "", "str"),
+        ParamDef("receiver_id", "视频Receiver ID", "", "str",
                  "留空自动选择 format=video 的 receiver"),
+        ParamDef("audio_sdp_file", "音频SDP文件", "", "str",
+                 "音频 SDP，与 audio_sdp_text/audio_sdp_url 三选一"),
+        ParamDef("audio_sdp_text", "音频SDP文本", "", "str"),
+        ParamDef("audio_sdp_url", "音频SDP的URL", "", "str"),
+        ParamDef("audio_receiver_id", "音频Receiver ID", "", "str",
+                 "留空自动选择 format=audio 的 receiver"),
+        ParamDef("anc_sdp_file", "ANCSDP文件", "", "str",
+                 "ANC(ST2110-40 辅助数据) SDP，与 anc_sdp_text/anc_sdp_url 三选一"),
+        ParamDef("anc_sdp_text", "ANCSDP文本", "", "str"),
+        ParamDef("anc_sdp_url", "ANCSDP的URL", "", "str"),
+        ParamDef("anc_receiver_id", "ANC Receiver ID", "", "str",
+                 "留空自动选择 format=anc/data 的 receiver"),
         ParamDef("list_only", "仅列出receivers", "0", "str", "1=只查询不写入"),
         ParamDef("timeout", "HTTP超时(秒)", "5", "float"),
         ParamDef("verify", "写后校验active", "1", "str"),
@@ -601,19 +673,73 @@ class NmosSdpWriteCase(TestCase):
             return TestResult(TestStatus.PASSED,
                               f"共 {len(items)} 个 receiver", data=data)
 
-        # ---- 写 SDP ----
+        # ---- 写 SDP（video / audio / anc 可分别提供，独立写入各自 receiver）----
+        verify = _truthy(self.p_str("verify"))
+        video_sdp = audio_sdp = anc_sdp = None
         try:
-            sdp = load_sdp(self.p_str("sdp_file"), self.p_str("sdp_text"),
-                           self.p_str("sdp_url"), session, timeout, log)
-            info = write_video_sdp(session, conn_base, node_base, sdp,
-                                   self.p_str("receiver_id").strip() or None,
-                                   timeout, _truthy(self.p_str("verify")), log)
+            # 视频 SDP（未提供时 load_sdp 抛"未提供 SDP"，属正常跳过）
+            try:
+                video_sdp = load_sdp(self.p_str("sdp_file"), self.p_str("sdp_text"),
+                                     self.p_str("sdp_url"), session, timeout, log)
+            except RuntimeError as e:
+                if "未提供 SDP" not in str(e):
+                    raise
+            # 音频 SDP
+            try:
+                audio_sdp = load_sdp(self.p_str("audio_sdp_file"),
+                                     self.p_str("audio_sdp_text"),
+                                     self.p_str("audio_sdp_url"),
+                                     session, timeout, log)
+            except RuntimeError as e:
+                if "未提供 SDP" not in str(e):
+                    raise
+            # ANC 辅助数据 SDP（ST 2110-40）
+            try:
+                anc_sdp = load_sdp(self.p_str("anc_sdp_file"),
+                                   self.p_str("anc_sdp_text"),
+                                   self.p_str("anc_sdp_url"),
+                                   session, timeout, log)
+            except RuntimeError as e:
+                if "未提供 SDP" not in str(e):
+                    raise
+        except (OSError, requests.RequestException) as e:
+            return TestResult(TestStatus.FAILED, f"SDP 加载失败: {e}", data=data)
+
+        if not video_sdp and not audio_sdp and not anc_sdp:
+            return TestResult(TestStatus.FAILED,
+                              "未提供任何 SDP：video / audio / anc 至少其一需提供"
+                              "（sdp_file/sdp_text/sdp_url 或 "
+                              "audio_sdp_* / anc_sdp_* 各组三选一）",
+                              data=data)
+
+        done = []
+        try:
+            if video_sdp:
+                vinfo = write_video_sdp(
+                    session, conn_base, node_base, video_sdp,
+                    self.p_str("receiver_id").strip() or None,
+                    timeout, verify, log)
+                data.update({f"video_{k}": v for k, v in vinfo.items()})
+                done.append(f"视频 receiver {vinfo['receiver_id']}")
+            if audio_sdp:
+                ainfo = write_audio_sdp(
+                    session, conn_base, node_base, audio_sdp,
+                    self.p_str("audio_receiver_id").strip() or None,
+                    timeout, verify, log)
+                data.update({f"audio_{k}": v for k, v in ainfo.items()})
+                done.append(f"音频 receiver {ainfo['receiver_id']}")
+            if anc_sdp:
+                ninfo = write_anc_sdp(
+                    session, conn_base, node_base, anc_sdp,
+                    self.p_str("anc_receiver_id").strip() or None,
+                    timeout, verify, log)
+                data.update({f"anc_{k}": v for k, v in ninfo.items()})
+                done.append(f"ANC receiver {ninfo['receiver_id']}")
         except (RuntimeError, OSError, requests.RequestException) as e:
             return TestResult(TestStatus.FAILED, f"{e}", data=data)
-        data.update(info)
         return TestResult(
             TestStatus.PASSED,
-            f"SDP 已写入并激活 receiver {info['receiver_id']}", data=data)
+            "SDP 已写入并激活: " + "; ".join(done), data=data)
 
 
 # ---------------- 单独运行入口 ----------------
@@ -636,10 +762,18 @@ def _main() -> None:
                     help="NMOS API 端口；0=自动（mDNS TXT 或逐候选探测）")
     ap.add_argument("--iface", default=None,
                     help="绑定本机源 IP 发送（如 192.168.17.166）；mDNS 亦用该网卡")
-    ap.add_argument("--sdp-file", default=None, help="SDP 文件路径")
-    ap.add_argument("--sdp-text", default=None, help="SDP 文本")
-    ap.add_argument("--sdp-url", default=None, help="SDP 的 URL")
+    ap.add_argument("--sdp-file", default=None, help="视频 SDP 文件路径")
+    ap.add_argument("--sdp-text", default=None, help="视频 SDP 文本")
+    ap.add_argument("--sdp-url", default=None, help="视频 SDP 的 URL")
     ap.add_argument("--receiver-id", default=None, help="留空自动选视频 receiver")
+    ap.add_argument("--audio-sdp-file", default=None, help="音频 SDP 文件路径")
+    ap.add_argument("--audio-sdp-text", default=None, help="音频 SDP 文本")
+    ap.add_argument("--audio-sdp-url", default=None, help="音频 SDP 的 URL")
+    ap.add_argument("--audio-receiver-id", default=None, help="留空自动选音频 receiver")
+    ap.add_argument("--anc-sdp-file", default=None, help="ANC SDP(ST2110-40) 文件路径")
+    ap.add_argument("--anc-sdp-text", default=None, help="ANC SDP 文本")
+    ap.add_argument("--anc-sdp-url", default=None, help="ANC SDP 的 URL")
+    ap.add_argument("--anc-receiver-id", default=None, help="留空自动选 ANC/data receiver")
     ap.add_argument("--list", action="store_true", help="仅列出 receivers")
     ap.add_argument("--mdns", action="store_true", help="mDNS 按设备名发现设备")
     ap.add_argument("--mdns-name", default="2110 IP UpDownCross 12G")
@@ -655,6 +789,14 @@ def _main() -> None:
         "mdns_name": args.mdns_name, "mdns_duration": str(args.mdns_duration),
         "sdp_file": args.sdp_file or "", "sdp_text": args.sdp_text or "",
         "sdp_url": args.sdp_url or "", "receiver_id": args.receiver_id or "",
+        "audio_sdp_file": args.audio_sdp_file or "",
+        "audio_sdp_text": args.audio_sdp_text or "",
+        "audio_sdp_url": args.audio_sdp_url or "",
+        "audio_receiver_id": args.audio_receiver_id or "",
+        "anc_sdp_file": args.anc_sdp_file or "",
+        "anc_sdp_text": args.anc_sdp_text or "",
+        "anc_sdp_url": args.anc_sdp_url or "",
+        "anc_receiver_id": args.anc_receiver_id or "",
         "list_only": "1" if args.list else "0", "timeout": str(args.timeout),
         "verify": "0" if args.no_verify else "1",
     })
