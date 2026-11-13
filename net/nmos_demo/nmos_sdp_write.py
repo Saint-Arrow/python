@@ -98,6 +98,16 @@ def _req(session, method: str, url: str, timeout: float,
     return r, payload
 
 
+def _err(r: "requests.Response") -> str:
+    """提取 HTTP 错误响应体（设备常把 4xx 拒绝原因放在 body 里）。"""
+    if r is None:
+        return ""
+    try:
+        return json.dumps(r.json(), ensure_ascii=False)[:300]
+    except ValueError:
+        return (r.text or "")[:300]
+
+
 def _host_to_ip(url: str, ip: str) -> str:
     """把 URL 里的主机名（可能是 xxx.local）替换为设备 IP，保留端口。"""
     parts = urlsplit(url)
@@ -251,36 +261,51 @@ def pick_video_receiver(session, conn_base: str, node_base: Optional[str],
 
 def _stage_and_activate(session, conn_base: str, rid: str, sdp: str,
                         timeout: float, log) -> None:
-    """写 SDP 到 staged 并立即激活；多策略兼容不同设备实现。"""
+    """写 SDP 到 staged 并立即激活。
+
+    重要：IS-05 v1.0 的 /staged 资源仅允许 GET 与 PATCH，PUT 一律返回
+    405（Method Not Allowed），因此全程使用 PATCH，绝不用 PUT。
+    file 模式（提供了 transport_file）下省略 sender_id 字段——部分 BMD 固件
+    的 IS-05 字面实现会把显式 "sender_id": null 当作非法而回 400。
+    """
     staged = f"{conn_base}/single/receivers/{rid}/staged"
     tf = {"transport_file": {"data": sdp, "type": "application/sdp"}}
     act = {"activation": {"mode": "activate_immediate"}}
-    # 部分设备（如 BMD）为字面实现：不显式 master_enable=true 则"激活 disabled
-    # 状态"；sender_id=null 表示 file 模式（清除残留的 IS-04 路由关联）。
-    on = {"master_enable": True, "sender_id": None}
 
-    # 策略 1：一次 PATCH（transport_file + activation）
-    r, payload = _req(session, "PATCH", staged, timeout, log,
-                      json_body={**on, **tf, **act})
-    if r.ok and isinstance(payload, dict):
-        if (payload.get("activation") or {}).get("state") != "cancelled":
-            return
+    def _patch(body) -> Tuple[bool, "Optional[requests.Response]", object]:
+        r, payload = _req(session, "PATCH", staged, timeout, log, json_body=body)
+        if r.ok and isinstance(payload, dict) and \
+           (payload.get("activation") or {}).get("state") != "cancelled":
+            return True, r, payload
+        return False, r, payload
 
-    # 策略 2：分两步 PATCH（先 SDP 再激活）
-    r1, _ = _req(session, "PATCH", staged, timeout, log, json_body={**on, **tf})
-    r2, _ = _req(session, "PATCH", staged, timeout, log, json_body=act)
-    if r1.ok and r2.ok:
+    # 策略 1：一步 PATCH（SDP + master_enable + 立即激活）
+    ok, r, _ = _patch({**tf, "master_enable": True, **act})
+    if ok:
         return
 
-    # 策略 3：GET staged 合并后 PUT 全量
-    r0, cur = _req(session, "GET", staged, timeout, log)
-    if r0.ok and isinstance(cur, dict):
-        cur.update({**tf, **act})
-        r3, _ = _req(session, "PUT", staged, timeout, log, json_body=cur)
-        if r3.ok:
-            return
+    # 策略 2：两步 PATCH（先写 SDP，再单独激活）——兼容"字面实现"设备
+    ok_sdp, r_sdp, _ = _patch({**tf, "master_enable": True})
+    ok_act, r_act, _ = _patch(act)
+    if ok_sdp and ok_act:
+        return
+
+    # 诊断：把设备返回的 4xx 错误体原样带回，便于定位 SDP/参数问题
+    detail = ""
+    if not ok_sdp and r_sdp is not None and r_sdp.status_code >= 400:
+        detail += f" [写SDP:{r_sdp.status_code} {_err(r_sdp)}]"
+    if not ok_act and r_act is not None and r_act.status_code >= 400:
+        detail += f" [激活:{r_act.status_code} {_err(r_act)}]"
+    if not detail and r is not None and r.status_code >= 400:
+        detail += f" [一步PATCH:{r.status_code} {_err(r)}]"
+    codes = "/".join(str(rr.status_code)
+                     for rr in (r, r_sdp, r_act) if rr is not None)
+    if ok_sdp and not ok_act:
+        raise RuntimeError(
+            "SDP 已写入但激活失败（设备接受了 SDP 但未起流：检查 transport_file"
+            f" 与 PTP/ts-refclk 是否合法）状态码 {codes}{detail}")
     raise RuntimeError("写入/激活 SDP 失败，请检查 SDP 内容与设备 IS-05 支持"
-                       f"（状态码 {r.status_code}/{r1.status_code}/{r2.status_code}）")
+                       f"（状态码 {codes}）{detail}")
 
 
 def write_video_sdp(session, conn_base: str, node_base: Optional[str], sdp: str,

@@ -1,0 +1,10 @@
+{
+  "activation": {"mode": null, "requested_time": null},
+  "transport_file": {"data": null, "type": null},
+  "transport_params": [{
+    "source_ip": "192.168.17.166",
+    "destination_ip": "239.17.17.100",
+    "destination_port": 5004,
+    "rtp_enabled": false
+  }]
+}

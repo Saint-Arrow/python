@@ -1,0 +1,19 @@
+{
+  "id": "ac6e1d50-7f8a-4b9c-8d34-e5f6a7b8c9da",
+  "version": "1700000000:0",
+  "label": "Virtual Sender 1",
+  "description": "static sender, no real RTP stream (stage A)",
+  "tags": {},
+  "flow_id": "9b5d0c40-6e7f-4a8b-9c23-d4e5f6a7b8c9",
+  "transport": "urn:x-nmos:transport:rtp.mcast",
+  "device_id": "7f3b8a20-4c5d-4e6f-9a01-b2c3d4e5f6a7",
+  "manifest_href": "http://192.168.17.166:8090/sdp/video.sdp",
+  "interface_bindings": [
+    "SFP F"
+  ],
+  "subscription": {
+    "receiver_id": null,
+    "active": false
+  },
+  "caps": {}
+}

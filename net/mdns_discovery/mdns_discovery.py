@@ -124,12 +124,12 @@ def _decode(value) -> str:
 def _parse_interfaces(iface: Optional[str]):
     """把 iface 参数解析为 zeroconf 的 interfaces 值。
 
-    None/空 -> None（zeroconf 默认：仅系统默认路由所在的网卡）
-    "all"/"*" -> InterfaceChoice.All（所有网卡）
+    None/空/"all"/"*" -> InterfaceChoice.All（所有网卡，多网卡/多默认路由机器
+                          上 Default 模式可能绑错网卡导致收不到组播，故默认 All）
     其他 -> IP 字符串列表（逗号分隔可指定多张网卡）
     """
     if not iface or not iface.strip():
-        return None
+        return InterfaceChoice.All
     text = iface.strip().lower()
     if text in ("all", "*"):
         return InterfaceChoice.All
@@ -140,13 +140,10 @@ def _make_zeroconf(iface: Optional[str], log: Callable[[str], None]) -> Zeroconf
     """按 iface 描述创建 Zeroconf 实例，并打印实际使用的网卡便于排障。"""
     interfaces = _parse_interfaces(iface)
     zc = Zeroconf(interfaces=interfaces)
-    if interfaces is None:
-        log("    网卡: 默认（系统默认路由网卡）")
+    if interfaces is InterfaceChoice.All:
+        log("    网卡: 所有网卡")
     else:
-        try:
-            log(f"    网卡: {list(zc.interfaces)}")
-        except Exception:
-            pass
+        log(f"    网卡: {interfaces}")
     return zc
 
 
@@ -157,7 +154,7 @@ def discover_services(service_type: Optional[str], duration: int,
     """启动服务发现，阻塞 duration 秒后返回发现到的服务名列表。
 
     sleep_fn 提供时可中断等待（平台停止请求时提前返回已发现结果）。
-    iface 指定网卡：None=默认路由网卡；"all"=所有网卡；或本机 IP 列表。
+    iface 指定网卡：空=所有网卡；或本机 IP 列表。
     """
     log(f"==> 开始 mDNS 服务发现，监听 {duration} 秒...")
     zeroconf = _make_zeroconf(iface, log)
@@ -293,7 +290,7 @@ class MdnsDiscoveryCase(TestCase):
                  "如 _http._tcp.local.，留空=监听全部（discover/both 有效）"),
         ParamDef("duration", "发现时长(秒)", "10", "int"),
         ParamDef("iface", "网卡", "", "str",
-                 "空=系统默认路由网卡；all=所有网卡；或填本机 IP（逗号分隔多个）"),
+                 "空=所有网卡；或填本机 IP（逗号分隔多个）"),
     ]
 
     def run(self, ctx: Context, log: LogFn) -> TestResult:
@@ -396,8 +393,8 @@ def _main() -> None:
     ap.add_argument("--resolve-timeout", type=float, default=5.0,
                     help="主机名解析超时（秒），默认 5.0")
     ap.add_argument("--iface", default=None,
-                    help="指定网卡：all=所有网卡；或本机 IP（逗号分隔多个）；"
-                         "默认=系统默认路由网卡")
+                    help="指定网卡：或本机 IP（逗号分隔多个）；"
+                         "默认=所有网卡")
     ap.add_argument("--verbose", action="store_true", help="开启详细日志")
     args = ap.parse_args()
 
