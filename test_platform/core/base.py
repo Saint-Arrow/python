@@ -53,7 +53,7 @@ class Context:
     def __init__(self) -> None:
         self._data: Dict[str, Any] = {}
         self.current_loop: int = 1   # 从 1 开始
-        self.total_loops: int = 1
+        self.total_loops: int = 1    # -1 表示无限循环
 
     def set(self, key: str, value: Any) -> None:
         self._data[key] = value

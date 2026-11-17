@@ -110,14 +110,17 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.btn_stop)
         bar.addWidget(QLabel("循环轮数:"))
         self.spin_loops = QSpinBox()
-        self.spin_loops.setRange(1, 100000)
-        self.spin_loops.setValue(1)
-        self.spin_loops.setToolTip("整条队列重复执行的轮数（老化测试用）")
+        self.spin_loops.setRange(-1, 100000)
+        self.spin_loops.setValue(-1)
+        self.spin_loops.setSpecialValueText("∞ 无限")  # 值为最小值(-1)时的显示
+        self.spin_loops.setToolTip(
+            "整条队列重复执行的轮数（老化测试用）；-1 表示无限循环，"
+            "直到点停止或失败中止")
         bar.addWidget(self.spin_loops)
         bar.addWidget(QLabel("失败策略:"))
         self.combo_fail = QComboBox()
+        self.combo_fail.addItem("失败后中止", FAIL_ABORT)   # 默认：失败即停止整队
         self.combo_fail.addItem("失败后继续", FAIL_CONTINUE)
-        self.combo_fail.addItem("失败后中止", FAIL_ABORT)
         bar.addWidget(self.combo_fail)
         bar.addStretch(1)
         btn_save = QPushButton("保存方案")
@@ -222,10 +225,14 @@ class MainWindow(QMainWindow):
         if cls is None:
             return
         uid = next(self._uid_seq)
-        qi = QueueItem(case_id=case_id, name=cls.name,
+        # 同一测试项可多次加入队列（如多个不同时长的延时项）：
+        # 第 2 个起显示名带序号便于区分；功能与参数按 uid 独立，不依赖显示名。
+        dup = sum(1 for qi in self.queue_items if qi.case_id == case_id) + 1
+        display = cls.name if dup == 1 else f"{cls.name} #{dup}"
+        qi = QueueItem(case_id=case_id, name=display,
                        params={p.key: str(p.default) for p in cls.params})
         self._uid_of[uid] = qi
-        lw = QListWidgetItem(f"○  {cls.name}")
+        lw = QListWidgetItem(f"○  {display}")
         lw.setData(Qt.UserRole, uid)
         lw.setToolTip(cls.description)
         self.list_queue.addItem(lw)
@@ -367,7 +374,7 @@ class MainWindow(QMainWindow):
                 qi.status = TestStatus(status)
             except ValueError:
                 pass
-            loop_txt = f"[轮{loop}] " if self.spin_loops.value() > 1 else ""
+            loop_txt = f"[轮{loop}] " if self.spin_loops.value() != 1 else ""
             qi.message = loop_txt + msg
             qi.duration = dur
             self._refresh_queue_row(idx)
@@ -378,6 +385,8 @@ class MainWindow(QMainWindow):
         self._append_log(
             f"汇总: 通过 {summary['passed_items']} / 失败 {summary['failed_items']}"
             f" / 中止 {'是' if summary['aborted'] else '否'}"
+            f"（累计 {summary.get('total_executions', summary['item_count'])} 次执行"
+            f" / {summary.get('executed_loops', 1)} 轮）"
             f" / 耗时 {summary['total_seconds']}s")
 
     # ------------------------------------------------------------- 日志/方案
@@ -439,7 +448,7 @@ class MainWindow(QMainWindow):
             if qi:
                 qi.params = {p.key: str(d.get("params", {}).get(p.key, p.default))
                              for p in cls.params}
-        self.spin_loops.setValue(plan.get("loops", 1))
+        self.spin_loops.setValue(plan.get("loops", -1))
         idx = self.combo_fail.findData(plan.get("fail_policy", FAIL_CONTINUE))
         if idx >= 0:
             self.combo_fail.setCurrentIndex(idx)

@@ -25,3 +25,7 @@ net/nginx-demo/server_out.txt
 net/nginx-demo/server_err.txt
 net/nginx-demo/log/
 net/nmos_demo/diags/
+
+# 抓包文件（调试产物，非源码）
+*.pcap
+*.pcapng

@@ -6,7 +6,8 @@
 - 失败策略：继续 / 中止整队
 - 参数占位符 {key} 在每项运行前用 Context 当前值替换（延迟替换，
   保证引用的是上一步刚产出的数据）
-- 运行结束生成 JSON 报告
+- 运行结束生成 JSON 报告；汇总/报告按"逐次执行记录"累计所有轮次，
+  多轮循环不会只统计最后一轮（executions 字段含全部明细）
 """
 
 import json
@@ -60,14 +61,17 @@ class QueueRunner(threading.Thread):
     """后台执行线程。UI 调 start() 后通过回调收日志与状态。"""
 
     def __init__(self, queue: List[QueueItem], loops: int = 1,
-                 fail_policy: str = FAIL_CONTINUE,
+                 fail_policy: str = FAIL_ABORT,
                  on_log: Optional[LogCallback] = None,
                  on_item_status: Optional[StatusCallback] = None,
                  on_done: Optional[DoneCallback] = None,
                  report_dir: str = "reports") -> None:
         super().__init__(daemon=True)
         self.queue = queue
-        self.loops = max(1, int(loops))
+        # 负数（如 -1）= 无限循环，直到失败中止或用户停止；0 视为 1
+        self.loops = int(loops)
+        if self.loops == 0:
+            self.loops = 1
         self.fail_policy = fail_policy
         self.on_log = on_log or (lambda s: None)
         self.on_item_status = on_item_status or (lambda *a: None)
@@ -104,18 +108,25 @@ class QueueRunner(threading.Thread):
                 case._raw_params[k] = _PLACEHOLDER.sub(sub, v)
 
     def run(self) -> None:  # threading.Thread 入口
-        results_log: List[dict] = []
+        # 逐次执行记录：多轮循环时每轮每项各记一条（统计与报告均基于此，
+        # 避免 QueueItem.status 单槽被后一轮覆盖导致只统计最后一轮）
+        executions: List[dict] = []
         started = time.time()
-        self._log(f"========== 队列启动：{len(self.queue)} 项 × {self.loops} 轮，"
+        loops_txt = "无限循环" if self.loops < 0 else f"{self.loops} 轮"
+        self._log(f"========== 队列启动：{len(self.queue)} 项 × {loops_txt}，"
                   f"失败策略={self.fail_policy} ==========")
         aborted = False
 
-        for loop in range(1, self.loops + 1):
-            if aborted or self.stop_requested:
+        loop = 0
+        while not aborted and not self.stop_requested:
+            loop += 1
+            if self.loops >= 1 and loop > self.loops:
                 break
             self._ctx.current_loop = loop
-            if self.loops > 1:
-                self._log(f"—————— 第 {loop}/{self.loops} 轮 ——————")
+            if self.loops != 1:
+                head = (f"第 {loop}/{self.loops} 轮" if self.loops > 1
+                        else f"第 {loop} 轮（无限）")
+                self._log(f"—————— {head} ——————")
 
             for idx, item in enumerate(self.queue):
                 if self.stop_requested:
@@ -127,6 +138,11 @@ class QueueRunner(threading.Thread):
                     item.status = TestStatus.ERROR
                     item.message = f"未注册的测试项: {item.case_id}"
                     self.on_item_status(idx, loop, item.status, item.message, 0.0)
+                    executions.append(
+                        {"loop": loop, "index": idx, "case_id": item.case_id,
+                         "name": item.name or item.case_id,
+                         "status": item.status.value,
+                         "message": item.message, "duration": 0.0})
                     continue
 
                 display = case.name or item.name or item.case_id
@@ -164,6 +180,10 @@ class QueueRunner(threading.Thread):
                 self.on_item_status(idx, loop, item.status, result.message, duration)
                 self._log(f"  ◀ {display} -> {result.status.value}"
                           f"（{duration}s）{result.message}")
+                executions.append(
+                    {"loop": loop, "index": idx, "case_id": item.case_id,
+                     "name": display, "status": result.status.value,
+                     "message": result.message, "duration": duration})
 
                 if result.status in (TestStatus.FAILED, TestStatus.ERROR):
                     if self.fail_policy == FAIL_ABORT:
@@ -172,23 +192,34 @@ class QueueRunner(threading.Thread):
                         break
 
         total = round(time.time() - started, 2)
-        passed = sum(1 for i in self.queue if i.status == TestStatus.PASSED)
-        failed = sum(1 for i in self.queue if i.status in (TestStatus.FAILED, TestStatus.ERROR))
+        # 统计基于逐次执行记录（所有轮次累计），而非 QueueItem 最后一轮状态
+        passed = sum(1 for e in executions
+                     if e["status"] == TestStatus.PASSED.value)
+        failed = sum(1 for e in executions
+                     if e["status"] in (TestStatus.FAILED.value, TestStatus.ERROR.value))
+        skipped = sum(1 for e in executions
+                      if e["status"] == TestStatus.SKIPPED.value)
+        executed_loops = executions[-1]["loop"] if executions else 0
         summary = {
             "finished_at": datetime.now().isoformat(timespec="seconds"),
             "total_seconds": total,
             "loops": self.loops,
+            "executed_loops": executed_loops,
             "item_count": len(self.queue),
+            "total_executions": len(executions),
             "passed_items": passed,
             "failed_items": failed,
+            "skipped_items": skipped,
             "aborted": aborted or self.stop_requested,
         }
-        self._log(f"========== 队列结束：通过 {passed} / 失败 {failed}，"
-                  f"耗时 {total}s ==========")
-        self._save_report(summary)
+        self._log(f"========== 队列结束：通过 {passed} / 失败 {failed}"
+                  + (f" / 跳过 {skipped}" if skipped else "")
+                  + f"，累计 {len(executions)} 次执行 / {executed_loops} 轮"
+                  f"，耗时 {total}s ==========")
+        self._save_report(summary, executions)
         self.on_done(summary)
 
-    def _save_report(self, summary: dict) -> None:
+    def _save_report(self, summary: dict, executions: List[dict]) -> None:
         try:
             os.makedirs(self.report_dir, exist_ok=True)
             fname = datetime.now().strftime("report_%Y%m%d_%H%M%S.json")
@@ -196,11 +227,14 @@ class QueueRunner(threading.Thread):
             payload = {
                 "summary": summary,
                 "context": {k: repr(v) for k, v in self._ctx.snapshot().items()},
+                # items: 各队列项最后一轮的状态（UI 表格口径）
                 "items": [dict(i.to_dict(),
                                status=i.status.value,
                                message=i.message,
                                duration=i.duration)
                           for i in self.queue],
+                # executions: 全部轮次的逐次执行明细（多轮烤机统计口径）
+                "executions": executions,
             }
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
