@@ -4,9 +4,9 @@ ST2110 Synced Test - 验证设备 reboot 后是否会出现 unsync 的情况
 流程（轮次制）:
 1. 发送 reboot 请求
 2. 等待 40s（可配置）让设备重启完成
-3. 发送一次 sync 检测请求
-4. 如果 synced(1)：本轮成功，回到步骤 1 进行下一轮 reboot 测试
-5. 如果 unsync(0) 或异常：停止测试，打印当前成功轮次数
+3. 逐个检测所有流(默认 20/30/40)的 sync 状态
+4. 全部 synced(1)：本轮成功，回到步骤 1 进行下一轮 reboot 测试
+5. 任一流 unsync(0) 或异常：停止测试，打印当前成功轮次数
 
 用法（一份代码，两种用法）:
 1. 单独运行: python st2110_synced_test.py --ip 192.168.17.80
@@ -20,6 +20,7 @@ ST2110 Synced Test - 验证设备 reboot 后是否会出现 unsync 的情况
 """
 
 import os
+import re
 import requests
 import time
 import sys
@@ -46,15 +47,50 @@ DEFAULT_DEVICE_IP = "192.168.17.80"
 
 REBOOT_WAIT_SECONDS = 70       # reboot 之后等待时间（秒）
 REBOOT_URL_PATH = ":8080/api/upgrade/reboot"
-SYNC_URL_PATH = ":8081/cgi-bin/smpte2059?action=GET%20ST2110_ENC_STREAM_SYNC%2020"
-# SYNC_URL_PATH = "/fpga_st2110/cgi-bin/smpte2059?action=GET%20ST2110_ENC_STREAM_SYNC%2020"
-EXPECTED_RESPONSE = "RGET ST2110_ENC_STREAM_SYNC 20 1"
+
+# 需要检测 sync 的流 ID 列表：全部 synced 才算通过，任一 unsync 即失败
+SYNC_STREAM_IDS = ("20", "30", "40")
+
+# URL / 期望响应模板：<stream_id> 会被替换为实际流 ID。
+# 注意：占位符用 <stream_id> 而非 {stream_id}，避免被平台 Runner 的
+# Context {var} 占位符替换机制误处理。
+SYNC_URL_TEMPLATE = \
+    ":8081/cgi-bin/smpte2059?action=GET%20ST2110_ENC_STREAM_SYNC%20<stream_id>"
+# SYNC_URL_TEMPLATE = "/fpga_st2110/cgi-bin/smpte2059?action=GET%20ST2110_ENC_STREAM_SYNC%20<stream_id>"
+EXPECTED_TEMPLATE = "RGET ST2110_ENC_STREAM_SYNC <stream_id> 1"
 
 
-def get_sync_status(device_ip: str, url_path: str = SYNC_URL_PATH,
+def _ensure_template(val: str) -> str:
+    """把各种历史写法统一成带 <stream_id> 占位符的模板。
+
+    新式:        "...SYNC%20<stream_id>"                     -> 原样返回
+    {stream_id}: "...SYNC%20{stream_id}"                     -> "...SYNC%20<stream_id>"
+    旧 url_path: "...ST2110_ENC_STREAM_SYNC%2020"            -> "...SYNC%20<stream_id>"
+    旧 expected: "RGET ST2110_ENC_STREAM_SYNC 20 1"          -> "RGET ... <stream_id> 1"
+    """
+    val = val.strip()
+    if "<stream_id>" in val:
+        return val
+    if "{stream_id}" in val:
+        return val.replace("{stream_id}", "<stream_id>")
+    # 旧式 url_path：末尾 %20<数字> 替换为占位符
+    head, sep, tail = val.rpartition("%20")
+    if sep and tail.isdigit():
+        return head + "%20<stream_id>"
+    # 旧式 expected：末两字段为 <stream_id> <状态>，把倒数第二段替换为占位符
+    return re.sub(r"\s+(\S+)\s+(\S+)$", r" <stream_id> \2", val)
+
+
+def parse_stream_ids(streams_cfg: str) -> list:
+    """解析逗号分隔的流 ID 配置，如 "20,30,40" -> ["20", "30", "40"]"""
+    return [s.strip() for s in streams_cfg.split(",") if s.strip()]
+
+
+def get_sync_status(device_ip: str, stream_id: str,
+                    url_template: str = SYNC_URL_TEMPLATE,
                     timeout: int = 10) -> str:
-    """发送 sync 检测请求，返回原始响应文本（异常返回 "ERROR: ..."）"""
-    url = f"http://{device_ip}{url_path}"
+    """发送指定流的 sync 检测请求，返回原始响应文本（异常返回 "ERROR: ..."）"""
+    url = f"http://{device_ip}{url_template.replace('<stream_id>', stream_id)}"
     try:
         resp = requests.get(url, timeout=timeout)
         resp.raise_for_status()
@@ -63,13 +99,35 @@ def get_sync_status(device_ip: str, url_path: str = SYNC_URL_PATH,
         return f"ERROR: {e}"
 
 
-def is_synced(response_text: str, expected: str = EXPECTED_RESPONSE) -> bool:
+def is_synced(response_text: str, stream_id: str,
+              expected_template: str = EXPECTED_TEMPLATE) -> bool:
     """
-    判断返回值是否为 synced 状态
-    期望返回: RGET ST2110_ENC_STREAM_SYNC 20 1
+    判断指定流返回值是否为 synced 状态
+    期望返回: RGET ST2110_ENC_STREAM_SYNC <stream_id> 1
     最后一个字段为 1 表示 synced，0 表示 unsync
     """
-    return response_text == expected
+    return response_text == expected_template.replace("<stream_id>", stream_id)
+
+
+def check_all_streams(device_ip: str, stream_ids=SYNC_STREAM_IDS,
+                      url_template: str = SYNC_URL_TEMPLATE,
+                      expected_template: str = EXPECTED_TEMPLATE,
+                      timeout: int = 10, log=print):
+    """逐个检测所有流的 sync 状态。
+
+    :return: (all_synced: bool, responses: dict{stream_id: response})
+    """
+    responses = {}
+    all_synced = True
+    for sid in stream_ids:
+        resp = get_sync_status(device_ip, sid,
+                               url_template=url_template, timeout=timeout)
+        responses[sid] = resp
+        ok = is_synced(resp, sid, expected_template=expected_template)
+        if not ok:
+            all_synced = False
+        log(f"  流 {sid}: {resp} -> {'SYNCED' if ok else '未同步'}")
+    return all_synced, responses
 
 
 def wait_for_device(device_ip: str, wait_seconds: int = REBOOT_WAIT_SECONDS):
@@ -99,11 +157,16 @@ class St2110SyncCheckCase(TestCase):
     id = "st2110_sync_check"
     name = "ST2110 同步状态检测"
     category = "ST2110"
-    description = "发送 ST2110 sync 检测请求，响应末位为 1 判 synced（通过），否则失败"
+    description = ("逐流发送 ST2110 sync 检测请求(默认 20/30/40)，"
+                   "全部流末位为 1 判 synced（通过），任一流未同步即失败")
     params = [
         ParamDef("ip", "设备 IP", DEFAULT_DEVICE_IP, "str"),
-        ParamDef("url_path", "检测接口路径", SYNC_URL_PATH),
-        ParamDef("expected", "synced 判定响应", EXPECTED_RESPONSE),
+        ParamDef("streams", "检测流 ID 列表(逗号分隔)", ",".join(SYNC_STREAM_IDS),
+                 "str", "全部 synced 才通过，任一 unsync 即失败"),
+        ParamDef("url_path", "检测接口路径模板", SYNC_URL_TEMPLATE, "str",
+                 "含 <stream_id> 占位符；旧式单流/{stream_id} 写法会自动转换"),
+        ParamDef("expected", "synced 判定响应模板", EXPECTED_TEMPLATE, "str",
+                 "含 <stream_id> 占位符；旧式单流/{stream_id} 写法会自动转换"),
         ParamDef("timeout", "HTTP 超时(秒)", "10", "int"),
         ParamDef("retries", "检测次数(含首次)", "1", "int",
                  "配合 cgi_reboot 组队列时可设大些，等设备完全就绪"),
@@ -112,39 +175,52 @@ class St2110SyncCheckCase(TestCase):
 
     def run(self, ctx: Context, log: LogFn) -> TestResult:
         ip = self.p_str("ip")
-        url_path = self.p_str("url_path")
-        expected = self.p_str("expected")
+        stream_ids = parse_stream_ids(self.p_str("streams")) or list(SYNC_STREAM_IDS)
+        url_template = _ensure_template(self.p_str("url_path"))
+        expected_template = _ensure_template(self.p_str("expected"))
         timeout = self.p_int("timeout", 10)
         retries = max(1, self.p_int("retries", 1))
         wait = self.p_int("retry_wait", 5)
 
-        log(f"目标 {ip}  接口={url_path}")
-        log(f"判定响应: {expected!r}")
+        log(f"目标 {ip}  检测流: {stream_ids}")
+        log(f"接口模板: {url_template}")
+        log(f"判定模板: {expected_template!r}")
 
-        response = ""
+        responses = {}
+        summary = ""
         for attempt in range(1, retries + 1):
             if self.stop_requested:
                 return TestResult(TestStatus.SKIPPED, "用户停止")
-            log(f"[第 {attempt}/{retries} 次] GET http://{ip}{url_path}")
-            response = get_sync_status(ip, url_path=url_path, timeout=timeout)
-            if is_synced(response, expected):
+            log(f"[第 {attempt}/{retries} 次] 逐流检测 sync 状态")
+            all_synced, responses = check_all_streams(
+                ip, stream_ids, url_template=url_template,
+                expected_template=expected_template,
+                timeout=timeout, log=log)
+            summary = "; ".join(f"流{k}: {v}" for k, v in responses.items())
+            if all_synced:
                 ctx.set("st2110_synced", True)
-                ctx.set("st2110_response", response)
+                ctx.set("st2110_response", summary)
                 return TestResult(
                     TestStatus.PASSED,
-                    f"SYNCED (第 {attempt} 次检测, 响应: {response})",
-                    data={"st2110_synced": True, "st2110_response": response},
+                    f"SYNCED (第 {attempt} 次检测, {summary})",
+                    data={"st2110_synced": True,
+                          "st2110_response": summary,
+                          "streams": responses},
                 )
-            log(f"  响应: {response} -> 未同步")
+            bad = [k for k, v in responses.items()
+                   if not is_synced(v, k, expected_template=expected_template)]
+            log(f"  未同步的流: {bad}，共 {len(bad)}/{len(stream_ids)} 路未通过")
             if attempt < retries and not self.sleep_interruptible(wait, log):
                 return TestResult(TestStatus.SKIPPED, "用户停止（重试等待中）")
 
         ctx.set("st2110_synced", False)
-        ctx.set("st2110_response", response)
+        ctx.set("st2110_response", summary)
         return TestResult(
             TestStatus.FAILED,
-            f"UNSYNC: {retries} 次检测均未通过，最后一次响应: {response}",
-            data={"st2110_synced": False, "st2110_response": response},
+            f"UNSYNC: {retries} 次检测均有流未同步，最后响应: {summary}",
+            data={"st2110_synced": False,
+                  "st2110_response": summary,
+                  "streams": responses},
         )
 
 
@@ -152,7 +228,7 @@ def run_test(device_ip: str, reboot_wait: int, do_reboot: bool):
     """
     轮次制测试循环
 
-    每轮: reboot → 等待 → 检测一次 sync → 成功则进入下一轮，失败则停止
+    每轮: reboot → 等待 → 逐流检测 sync → 全部成功则进入下一轮，任一失败则停止
 
     :param device_ip: 设备 IP
     :param reboot_wait: reboot 后等待秒数
@@ -164,6 +240,7 @@ def run_test(device_ip: str, reboot_wait: int, do_reboot: bool):
     print("=" * 60)
     print(f"  ST2110 Synced Test")
     print(f"  设备地址: {device_ip}")
+    print(f"  检测流: {list(SYNC_STREAM_IDS)}")
     print(f"  Reboot 等待: {reboot_wait}s")
     print(f"  开始时间: {now()}")
     print("=" * 60)
@@ -187,23 +264,27 @@ def run_test(device_ip: str, reboot_wait: int, do_reboot: bool):
                 print(f"\n[{now()}] 跳过 Reboot（仅首轮）")
                 do_reboot = True  # 后续轮次正常 reboot
 
-            # Step 2: 检测一次 sync 状态
-            print(f"[{now()}] 检测 sync 状态...")
-            response = get_sync_status(device_ip)
+            # Step 2: 逐流检测 sync 状态（全部 synced 才算本轮成功）
+            print(f"[{now()}] 检测 sync 状态（流 {list(SYNC_STREAM_IDS)}）...")
+            all_synced, responses = check_all_streams(device_ip, log=print)
 
-            if is_synced(response):
+            if all_synced:
                 success_count += 1
-                print(f"[{now()}] 第 {round_num} 轮: SYNCED (响应: {response})")
+                print(f"[{now()}] 第 {round_num} 轮: SYNCED")
+                for sid, resp in responses.items():
+                    print(f"  流 {sid}: {resp}")
                 print(f"  当前成功轮次数: {success_count}")
                 # 成功 → 进入下一轮 reboot
             else:
-                # 失败 → 停止测试
+                # 任一流失败 → 停止测试
                 print()
                 print("!" * 60)
                 print(f"  [UNSYNC 检测到!]")
                 print(f"  成功轮次数: {success_count}")
-                print(f"  第 {round_num} 轮检测返回: {response}")
-                print(f"  时间: {now()}")
+                for sid, resp in responses.items():
+                    mark = "OK" if is_synced(resp, sid) else "UNSYNC"
+                    print(f"  流 {sid} [{mark}]: {resp}")
+                print(f"  第 {round_num} 轮检测时间: {now()}")
                 print("!" * 60)
                 break
 

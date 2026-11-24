@@ -104,7 +104,8 @@ class QueueRunner(threading.Thread):
             if isinstance(v, str) and "{" in v:
                 def sub(m):
                     val = self._ctx.get(m.group(1))
-                    return v if val is None else str(val)
+                    # 未知变量保留 {var} 原样（而非整个参数值，否则会把值翻倍拼接）
+                    return m.group(0) if val is None else str(val)
                 case._raw_params[k] = _PLACEHOLDER.sub(sub, v)
 
     def run(self) -> None:  # threading.Thread 入口

@@ -35,8 +35,12 @@ test_platform/
 | UDP 指令重启 | `udp_reboot` | `net/udp_reboot_test.py` | 循环发复位/关机指令做重启老化 |
 | CGI 接口重启 | `cgi_reboot` | `net/cgi_reboot_test.py` | 循环发 CGI(HTTP) reboot 请求做重启老化（自 st2110_synced_test 抽取，`http_reboot` 亦可作库导入） |
 | mDNS 发现/解析 | `mdns_discovery` | `net/mdns_discovery/mdns_discovery.py` | 监听 mDNS 服务广播、解析 xxx.local 为 IP，产出 `{device_ip}` |
-| ST2110 同步状态检测 | `st2110_sync_check` | `net/st2110_synced_test/st2110_synced_test.py` | 发送一次 sync 检测请求判定 synced/unsync；与 `cgi_reboot` 组队列 + 循环轮数即复现原脚本 reboot→检测老化流程 |
+| ST2110 同步状态检测 | `st2110_sync_check` | `net/st2110_synced_test/st2110_synced_test.py` | 逐流发送 sync 检测请求(默认流 20/30/40，`streams` 可配)，全部 synced 才通过、任一 unsync 即失败；与 `cgi_reboot` 组队列 + 循环轮数即复现原脚本 reboot→检测老化流程 |
 | 随机数生成 | `random_gen` | `base/random_gen/random_gen.py` | 生成 [min,max] 随机数（int/float、可去重、可固定种子），产出 `{random_value}`；下游参数引用它 + 循环轮数即随机参数烤机 |
+| VLC 拉流采集(JPG+PCM) | `vlc_capture` | `net/python_vlc_test/vlc_capture_test.py` | 一次拉取指定摄像机 RTSP 流：视频截图存 JPG + 音频录制存裸 PCM(s16le)，校验文件合法性后判定；产出 `{vlc_jpg_path}` `{vlc_pcm_path}` |
+| PTP Domain 查询 | `ptp_domain_query` | `net/ptp_domain_test/ptp_domain_test.py` | CGI 发送 `GET DOMAIN_NBR` 解析当前 PTP domain；产出 `{ptp_domain}` |
+| PTP Domain 设置+回读 | `ptp_domain_set_get` | `net/ptp_domain_test/ptp_domain_test.py` | 对每个 domain 值执行 `SET DOMAIN NBR` → `SET EFFECTUATE`(重启 ptp4l) → 等待15s → `GET DOMAIN_NBR` 回读校验；支持逗号分隔多值(如 `0,64,127`)、`{random_value}` 随机烤机 |
+| 延时等待 | `delay` | `tests/delay_test.py` | 在序列中插入可中断等待；**可多次加入队列**（如重启后等 60s 再检测、检测完再等 300s），各实例参数独立；秒数支持 `{random_value}` 等占位符做随机间隔 |
 
 待接入的老脚本（原地重构后登记进 `platform.json` 即可）：
 
@@ -50,10 +54,11 @@ test_platform/
 | 插件化 | 在 `tests/` 下建包放新文件，继承 `TestCase` 并加 `@register` 即自动出现在 UI 左侧 |
 | 脚本即插件 | `net/` 下老脚本**原地重构**也能接入：登记进 `platform.json`，单独可跑、平台可挂，一份代码两用 |
 | 勾选 | 左侧分类树勾选（或双击）→ "添加所选" 进队列 |
+| 重复添加 | **同一测试项可多次加入队列**（双击多次即可），内部按实例独立存储参数/状态，第 2 个起显示名自动带 `#序号` 便于区分；方案保存/加载同样支持重复项 |
 | 排序 | 队列内**拖拽排序**，或上移/下移按钮 |
 | 组合 | `run()` 返回的 `TestResult.data` 自动并入 `Context`；后续测试参数填 `{device_ip}` 等占位符即可引用上游产出（运行时才替换） |
-| 老化测试 | 工具栏"循环轮数"让整条队列跑 N 遍 |
-| 失败策略 | 失败后继续 / 中止整队 |
+| 老化测试 | 工具栏"循环轮数"让整条队列跑 N 遍；**-1（默认）= 无限循环**，直到点停止或失败中止 |
+| 失败策略 | 默认**失败后中止**整队；可切换为"失败后继续" |
 | 可中断 | 长等待走 `sleep_interruptible`，点停止数秒内退出 |
 | 方案 | 队列+参数+轮数保存为 JSON，下次一键复现 |
 | 报告 | 每次运行产出 `reports/report_*.json`；日志落盘 `logs/` |

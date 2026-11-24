@@ -1,0 +1,102 @@
+{
+  "loops": -1,
+  "fail_policy": "abort",
+  "items": [
+    {
+      "case_id": "ptp_domain_set_get",
+      "name": "PTP Domain 设置+生效+回读校验",
+      "params": {
+        "ip": "192.168.13.169",
+        "domain": "0",
+        "cgi_path": "/fpga_st2110/cgi-bin/smpte2059",
+        "verify_wait": "15",
+        "timeout": "10",
+        "retries": "2",
+        "retry_wait": "5",
+        "stop_on_fail": "1"
+      }
+    },
+    {
+      "case_id": "random_gen",
+      "name": "随机数生成 #2",
+      "params": {
+        "min": "1",
+        "max": "10",
+        "count": "1",
+        "type": "int",
+        "precision": "2",
+        "unique": "0",
+        "seed": ""
+      }
+    },
+    {
+      "case_id": "delay",
+      "name": "延时等待 #2",
+      "params": {
+        "seconds": "{random_value}",
+        "reason": ""
+      }
+    },
+    {
+      "case_id": "st2110_sync_check",
+      "name": "ST2110 同步状态检测",
+      "params": {
+        "ip": "192.168.17.80",
+        "streams": "20,30,40",
+        "url_path": ":8081/cgi-bin/smpte2059?action=GET%20ST2110_ENC_STREAM_SYNC%20<stream_id>",
+        "expected": "RGET ST2110_ENC_STREAM_SYNC <stream_id> 1",
+        "timeout": "10",
+        "retries": "1",
+        "retry_wait": "5"
+      }
+    },
+    {
+      "case_id": "ptp_domain_set_get",
+      "name": "PTP Domain 设置+生效+回读校验 #2",
+      "params": {
+        "ip": "192.168.13.169",
+        "domain": "127",
+        "cgi_path": "/fpga_st2110/cgi-bin/smpte2059",
+        "verify_wait": "15",
+        "timeout": "10",
+        "retries": "2",
+        "retry_wait": "5",
+        "stop_on_fail": "1"
+      }
+    },
+    {
+      "case_id": "random_gen",
+      "name": "随机数生成",
+      "params": {
+        "min": "1",
+        "max": "10",
+        "count": "1",
+        "type": "int",
+        "precision": "2",
+        "unique": "0",
+        "seed": ""
+      }
+    },
+    {
+      "case_id": "delay",
+      "name": "延时等待",
+      "params": {
+        "seconds": "{random_value}",
+        "reason": ""
+      }
+    },
+    {
+      "case_id": "st2110_sync_check",
+      "name": "ST2110 同步状态检测 #2",
+      "params": {
+        "ip": "192.168.17.80",
+        "streams": "20,30,40",
+        "url_path": ":8081/cgi-bin/smpte2059?action=GET%20ST2110_ENC_STREAM_SYNC%20<stream_id>",
+        "expected": "RGET ST2110_ENC_STREAM_SYNC <stream_id> 1",
+        "timeout": "10",
+        "retries": "1",
+        "retry_wait": "5"
+      }
+    }
+  ]
+}
